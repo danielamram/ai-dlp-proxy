@@ -195,19 +195,61 @@ sudo tcpdump -i en0 -w capture.pcap port 443
 3. Filter: `tcp.port == 443 && ip.dst == <AI-API-IP>`
 4. Note: HTTPS content is encrypted; see TLS inspection below
 
-### Using mitmproxy (Alternative Option)
+### Using mitmproxy for Full HTTPS Inspection (Recommended)
 
-You can also use mitmproxy for comparison:
+**Important**: The basic proxy only shows HTTPS connection metadata. To inspect actual encrypted content, use mitmproxy:
 
+#### Quick Start (3 Steps)
+
+**1. Install CA Certificate**
 ```bash
-# Install mitmproxy
-brew install mitmproxy
+# Generate certificate (run mitmproxy once)
+mitmproxy  # Press 'q' then 'y' to quit
 
-# Run on different port
-mitmproxy --listen-port 8889
-
-# Install CA cert: ~/.mitmproxy/mitmproxy-ca-cert.pem
+# Install & trust certificate
+./install-mitmproxy-cert.sh
 ```
+
+**2. Start mitmproxy**
+```bash
+# Interactive UI with full inspection
+./start-mitmproxy.sh
+
+# OR: With automatic DLP analysis (recommended)
+./start-mitmproxy-analyzer.sh
+
+# OR: Console logging only
+./start-mitmdump.sh
+```
+
+**3. Launch Cursor with Proxy**
+```bash
+./launch-cursor-with-mitmproxy.sh
+```
+
+#### What You'll See
+
+With mitmproxy, you can inspect:
+- ✅ Actual request bodies (your code, prompts, file contents)
+- ✅ AI responses (completions, suggestions)
+- ✅ Complete headers and metadata
+- ✅ Automatic detection of API keys, passwords, code patterns
+
+#### Python Analyzer Script
+
+The included `mitmproxy-analyzer.py` automatically classifies traffic:
+
+- **🔴 BLOCKED**: API keys, passwords, tokens, SSH keys
+- **🟡 SUSPICIOUS**: Code patterns, SQL queries, file paths
+- **🟢 SAFE**: No sensitive data detected
+
+#### Full Documentation
+
+See **[MITMPROXY-GUIDE.md](MITMPROXY-GUIDE.md)** for:
+- Detailed setup instructions
+- Navigation and filtering tips
+- Custom analysis scripts
+- Troubleshooting guide
 
 ### Using curl to Test
 

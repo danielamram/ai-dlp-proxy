@@ -31,6 +31,7 @@ const config = {
   logFullBody: process.env.LOG_FULL_BODY === 'true',
   targetHosts: (process.env.TARGET_HOSTS || '').split(',').filter(Boolean), // Empty = all hosts
   tlsIntercept: process.env.TLS_INTERCEPT !== 'false', // TLS interception enabled by default
+  timeout: parseInt(process.env.PROXY_TIMEOUT) || 30000, // Connection timeout in ms
 };
 
 // Create the proxy server
@@ -165,6 +166,13 @@ function interceptTLS(host, port, clientSocket, head) {
     ...tlsOptions,
   });
 
+  // Set timeout on TLS socket
+  tlsSocket.setTimeout(config.timeout);
+  tlsSocket.on('timeout', () => {
+    logError(`TLS socket timeout for ${host}`);
+    tlsSocket.destroy();
+  });
+
   // Handle TLS errors
   tlsSocket.on('error', (err) => {
     logError(`TLS socket error for ${host}`, err);
@@ -280,6 +288,7 @@ function forwardRequest(host, port, requestData, body, clientTlsSocket) {
     path: requestData.path,
     method: requestData.method,
     headers: requestData.headers,
+    timeout: config.timeout,
   };
 
   const proxyReq = https.request(options, (proxyRes) => {
@@ -299,6 +308,17 @@ function forwardRequest(host, port, requestData, body, clientTlsSocket) {
     proxyRes.on('end', () => {
       // Response complete
     });
+  });
+
+  proxyReq.on('timeout', () => {
+    logError(`Request timeout to ${host}:${port}`);
+    proxyReq.destroy();
+    const errorResponse = 'HTTP/1.1 504 Gateway Timeout\r\n' +
+                         'Content-Type: text/plain\r\n' +
+                         'Content-Length: 15\r\n' +
+                         '\r\n' +
+                         'Request timeout';
+    clientTlsSocket.write(errorResponse);
   });
 
   proxyReq.on('error', (err) => {
@@ -330,6 +350,9 @@ function createTunnel(host, port, clientSocket, head, monitored) {
 
     serverSocket.write(head);
 
+    // Set timeout on server socket
+    serverSocket.setTimeout(config.timeout);
+
     // Track data for monitoring
     if (monitored) {
       let bytesSent = 0;
@@ -356,6 +379,12 @@ function createTunnel(host, port, clientSocket, head, monitored) {
     // Pipe data bidirectionally
     clientSocket.pipe(serverSocket);
     serverSocket.pipe(clientSocket);
+  });
+
+  serverSocket.on('timeout', () => {
+    logError(`Tunnel timeout to ${host}:${port}`);
+    serverSocket.destroy();
+    clientSocket.end();
   });
 
   serverSocket.on('error', (err) => {

@@ -5,7 +5,8 @@
   "main": "src/proxy.js",
   "scripts": {
     "start": "node src/proxy.js",
-    "dev": "node --watch src/proxy.js"
+    "dev": "node --watch src/proxy.js",
+    "setup": "node src/setup-cert.js"
   },
   "keywords": [
     "dlp",
@@ -18,6 +19,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "chalk": "^4.1.2"
+    "chalk": "^4.1.2",
+    "node-forge": "^1.3.1"
   }
 }

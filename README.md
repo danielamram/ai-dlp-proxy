@@ -20,12 +20,17 @@ A Node.js Data Leakage Prevention (DLP) proxy for monitoring outbound traffic fr
 # Install dependencies
 npm install
 
+# Setup CA certificate for TLS interception (required for HTTPS inspection)
+npm run setup
+
 # Start the proxy
 npm start
 
 # Or with options
 PROXY_PORT=8888 BLOCK_MODE=true npm start
 ```
+
+> **Note**: TLS interception is enabled by default. You must install and trust the CA certificate to inspect HTTPS traffic. Without it, applications will show certificate errors.
 
 ## Configuration
 
@@ -37,11 +42,27 @@ Environment variables:
 | `BLOCK_MODE` | false | Set to `true` to block suspicious requests |
 | `LOG_FULL_BODY` | false | Log complete request bodies |
 | `TARGET_HOSTS` | (all) | Comma-separated list of hosts to monitor |
+| `TLS_INTERCEPT` | true | Enable TLS interception for HTTPS inspection |
 
 Example:
 ```bash
 PROXY_PORT=8080 BLOCK_MODE=true TARGET_HOSTS=api.openai.com,api.anthropic.com npm start
 ```
+
+### TLS Interception Mode
+
+**Enabled (default)**: Full HTTPS content inspection
+- Decrypts HTTPS traffic for analysis
+- Requires CA certificate installation
+- Shows detailed findings (SAFE/SUSPICIOUS/BLOCKED)
+
+**Disabled**: Transparent tunnel mode
+```bash
+TLS_INTERCEPT=false npm start
+```
+- Creates encrypted tunnels without inspection
+- No certificate installation needed
+- Only logs connection metadata (host, bytes transferred)
 
 ## Configuring Cursor/Apps to Use the Proxy
 
@@ -174,29 +195,19 @@ sudo tcpdump -i en0 -w capture.pcap port 443
 3. Filter: `tcp.port == 443 && ip.dst == <AI-API-IP>`
 4. Note: HTTPS content is encrypted; see TLS inspection below
 
-### Using mitmproxy (Full HTTPS Inspection)
+### Using mitmproxy (Alternative Option)
 
-mitmproxy can decrypt HTTPS traffic with certificate installation:
+You can also use mitmproxy for comparison:
 
 ```bash
 # Install mitmproxy
 brew install mitmproxy
 
-# Run in parallel with DLP proxy for comparison
+# Run on different port
 mitmproxy --listen-port 8889
 
-# Or use mitmdump for automated logging
-mitmdump --listen-port 8889 -w traffic.log
-
-# Filter for AI APIs
-mitmdump --listen-port 8889 "~d api.openai.com | ~d api.anthropic.com"
+# Install CA cert: ~/.mitmproxy/mitmproxy-ca-cert.pem
 ```
-
-To inspect HTTPS content with mitmproxy:
-1. Start mitmproxy
-2. Configure app to use mitmproxy
-3. Install CA cert: `~/.mitmproxy/mitmproxy-ca-cert.pem`
-4. Trust the certificate in Keychain (macOS)
 
 ### Using curl to Test
 
@@ -211,18 +222,81 @@ curl -x http://localhost:8888 http://httpbin.org/post \
   -d '{"code": "function test() { const API_KEY = \"secret123\"; }"}'
 ```
 
-## HTTPS Interception (Advanced)
+## TLS Interception Setup
 
-The basic proxy creates tunnels for HTTPS without inspecting content. For full HTTPS inspection:
+This proxy includes built-in TLS interception to inspect HTTPS traffic. Follow these steps:
 
-### Option 1: Use mitmproxy
-See the mitmproxy section above.
+### 1. Install the CA Certificate
 
-### Option 2: Implement TLS Interception
-Requires generating a CA certificate and modifying the proxy to perform TLS termination. This is complex and requires trusting your custom CA.
+Run the setup script:
+```bash
+npm run setup
+```
 
-### Option 3: Monitor at Application Level
-Some apps have debug/logging modes that expose request content before encryption.
+This will:
+- Generate a CA certificate (if not already present)
+- Install it to your system's trusted root store
+- Guide you through platform-specific steps
+
+**Certificate location**: `certs/ca-cert.pem`
+
+### 2. Manual Installation (if automatic fails)
+
+#### macOS
+```bash
+# Add to system keychain
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain certs/ca-cert.pem
+
+# Or use Keychain Access app:
+# 1. Open Keychain Access
+# 2. File → Import Items → Select certs/ca-cert.pem
+# 3. Double-click "AI DLP Proxy CA"
+# 4. Set Trust to "Always Trust"
+```
+
+#### Linux
+```bash
+# Ubuntu/Debian
+sudo cp certs/ca-cert.pem /usr/local/share/ca-certificates/ai-dlp-proxy.crt
+sudo update-ca-certificates
+
+# RHEL/CentOS
+sudo cp certs/ca-cert.pem /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust
+```
+
+#### Windows
+```powershell
+# Run as Administrator
+certutil -addstore -f "ROOT" certs\ca-cert.pem
+```
+
+### 3. Restart Applications
+
+After installing the certificate:
+1. Restart your browser or application (Cursor, VS Code, etc.)
+2. Start the proxy: `npm start`
+3. Configure the application to use the proxy
+
+### Troubleshooting TLS Interception
+
+**Certificate Errors**
+- Ensure the CA certificate is installed and trusted
+- Restart the application after installing the certificate
+- Check that TLS_INTERCEPT=true (default)
+
+**No Content Inspection**
+- Verify the certificate is in the system's trusted store
+- Check proxy logs for "TLS Interception: ENABLED"
+- Some apps may pin certificates and reject custom CAs
+
+**Use Transparent Mode Instead**
+If you can't install the certificate:
+```bash
+TLS_INTERCEPT=false npm start
+```
+This will tunnel HTTPS without inspection (connection metadata only).
 
 ## Known AI Tool Endpoints
 

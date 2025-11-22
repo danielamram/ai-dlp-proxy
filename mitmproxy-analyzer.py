@@ -211,19 +211,35 @@ def get_sample_matches(body, pattern, max_samples=3):
 
 def request(flow: http.HTTPFlow) -> None:
     """Analyze outgoing requests"""
-    
+
     # Only analyze Cursor traffic (or all if you want)
     if "api2.cursor.sh" not in flow.request.pretty_host:
         return
-    
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     # Get request body
     body = flow.request.text or ""
     body_size = len(body)
-    
-    # Analyze for sensitive data
-    findings = detector.analyze(body)
+
+    # Analyze body for sensitive data
+    body_findings = detector.analyze(body)
+
+    # Analyze headers for sensitive data (especially Authorization, Cookie, etc.)
+    header_text = ""
+    sensitive_headers = ['authorization', 'cookie', 'x-api-key', 'x-auth-token', 'proxy-authorization']
+    for key, value in flow.request.headers.items():
+        if key.lower() in sensitive_headers:
+            header_text += f"{key}: {value}\n"
+
+    header_findings = detector.analyze(header_text)
+
+    # Combine findings
+    findings = {
+        'critical': body_findings['critical'] + header_findings['critical'],
+        'suspicious': body_findings['suspicious'] + header_findings['suspicious'],
+        'safe': body_findings['safe'] and header_findings['safe']
+    }
     
     # Determine classification
     if findings['critical']:

@@ -8,6 +8,8 @@ Usage:
 
 import re
 import json
+import gzip
+import zlib
 from mitmproxy import http
 from datetime import datetime
 
@@ -54,23 +56,80 @@ class SensitiveDataDetector:
         'base64': re.compile(r'(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?'),
     }
     
-    def parse_body(self, body):
-        """Parse body content and extract text from various formats"""
-        if not body:
-            return ""
-        
-        text = body
-        parsed_data = {}
-        
-        # Try to parse as JSON
+    def extract_strings_from_binary(self, data, min_length=4):
+        """Extract readable ASCII/UTF-8 strings from binary data"""
+        if isinstance(data, str):
+            data = data.encode('utf-8', errors='ignore')
+
+        strings = []
+        current = []
+
+        for byte in data:
+            # Printable ASCII range (32-126) plus common whitespace
+            if 32 <= byte <= 126 or byte in (9, 10, 13):
+                current.append(chr(byte))
+            else:
+                if len(current) >= min_length:
+                    strings.append(''.join(current))
+                current = []
+
+        if len(current) >= min_length:
+            strings.append(''.join(current))
+
+        return strings
+
+    def decompress_body(self, raw_body, content_encoding):
+        """Decompress gzip/deflate body if needed"""
+        if not raw_body:
+            return raw_body
+
         try:
-            parsed_data = json.loads(body)
-            # Convert JSON back to pretty-printed string for pattern matching
-            text = json.dumps(parsed_data, indent=2)
-        except (json.JSONDecodeError, ValueError):
-            # Not JSON, use raw text
+            if content_encoding == 'gzip':
+                return gzip.decompress(raw_body)
+            elif content_encoding == 'deflate':
+                return zlib.decompress(raw_body)
+        except Exception:
             pass
-        
+
+        return raw_body
+
+    def parse_body(self, body, raw_body=None, content_encoding=None):
+        """Parse body content and extract text from various formats including protobuf"""
+        if not body and not raw_body:
+            return "", {}
+
+        text = body if body else ""
+        parsed_data = {}
+        extracted_strings = []
+
+        # Handle binary/protobuf data
+        if raw_body:
+            # Decompress if needed
+            decompressed = self.decompress_body(raw_body, content_encoding)
+
+            # Extract readable strings from binary
+            extracted_strings = self.extract_strings_from_binary(decompressed)
+
+            # Join extracted strings for analysis
+            if extracted_strings:
+                text = '\n'.join(extracted_strings)
+
+        # Try to parse as JSON (either from text or extracted strings)
+        try:
+            parsed_data = json.loads(body if body else text)
+            text = json.dumps(parsed_data, indent=2)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+        # Also look for embedded JSON in extracted strings
+        for s in extracted_strings:
+            if s.startswith('{') or s.startswith('['):
+                try:
+                    embedded_json = json.loads(s)
+                    text += '\n' + json.dumps(embedded_json, indent=2)
+                except:
+                    pass
+
         return text, parsed_data
     
     def extract_json_values(self, obj, depth=0, max_depth=10):
@@ -101,9 +160,9 @@ class SensitiveDataDetector:
         
         return values
     
-    def analyze(self, body):
+    def analyze(self, body, raw_body=None, content_encoding=None):
         """Analyze body for sensitive patterns with enhanced parsing"""
-        if not body:
+        if not body and not raw_body:
             return {
                 'critical': [],
                 'suspicious': [],
@@ -112,15 +171,15 @@ class SensitiveDataDetector:
                 'safe': True,
                 'body_type': 'empty'
             }
-        
+
         critical = []
         suspicious = []
         critical_samples = {}
         suspicious_samples = {}
-        
-        # Parse the body
-        text, parsed_data = self.parse_body(body)
-        body_type = 'json' if parsed_data else 'text'
+
+        # Parse the body (handles protobuf, gzip, JSON)
+        text, parsed_data = self.parse_body(body, raw_body, content_encoding)
+        body_type = 'protobuf' if raw_body and not parsed_data else ('json' if parsed_data else 'text')
         
         # For JSON, also check individual values
         json_values = []
@@ -165,10 +224,10 @@ class SensitiveDataDetector:
                 suspicious_samples[name] = samples
         
         # Additional checks
-        body_size = len(body)
-        if body_size > 10000:
-            suspicious.append(f"large_body: {body_size} bytes")
-        
+        raw_size = len(raw_body) if raw_body else len(body)
+        if raw_size > 10000:
+            suspicious.append(f"large_body: {raw_size} bytes")
+
         return {
             'critical': critical,
             'suspicious': suspicious,
@@ -176,7 +235,8 @@ class SensitiveDataDetector:
             'suspicious_samples': suspicious_samples,
             'safe': len(critical) == 0 and len(suspicious) == 0,
             'body_type': body_type,
-            'body_size': body_size
+            'body_size': raw_size,
+            'extracted_text': text[:2000] if text else ""  # Return extracted text for preview
         }
 
 detector = SensitiveDataDetector()
@@ -218,12 +278,14 @@ def request(flow: http.HTTPFlow) -> None:
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Get request body
+    # Get request body (both text and raw for protobuf handling)
     body = flow.request.text or ""
-    body_size = len(body)
+    raw_body = flow.request.raw_content
+    body_size = len(raw_body) if raw_body else len(body)
+    content_encoding = flow.request.headers.get('content-encoding', '').lower()
 
-    # Analyze body for sensitive data (ignoring headers as per user request)
-    findings = detector.analyze(body)
+    # Analyze body for sensitive data (handles protobuf, gzip, JSON)
+    findings = detector.analyze(body, raw_body, content_encoding)
     
     # Determine classification
     if findings['critical']:
@@ -255,13 +317,20 @@ def request(flow: http.HTTPFlow) -> None:
             else:
                 print(f"  {key}: {value}")
     
-    # Show body preview
-    if body:
-        print(f"\n{Colors.BLUE}Body Preview:{Colors.RESET}")
-        preview = body[:500]
-        if len(body) > 500:
+    # Show body preview (use extracted text for protobuf)
+    extracted_text = findings.get('extracted_text', '')
+    preview_text = extracted_text if extracted_text else body
+    if preview_text:
+        print(f"\n{Colors.BLUE}Extracted Content Preview:{Colors.RESET}")
+        preview = preview_text[:1000]
+        if len(preview_text) > 1000:
             preview += "..."
-        print(f"  {preview}")
+        # Show each line (for extracted strings)
+        for line in preview.split('\n')[:20]:
+            if line.strip():
+                print(f"  {line[:100]}")
+        if preview_text.count('\n') > 20:
+            print(f"  ... ({preview_text.count(chr(10))} total lines)")
     
     # Show findings
     if findings['critical']:

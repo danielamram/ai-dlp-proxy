@@ -222,24 +222,8 @@ def request(flow: http.HTTPFlow) -> None:
     body = flow.request.text or ""
     body_size = len(body)
 
-    # Analyze body for sensitive data
-    body_findings = detector.analyze(body)
-
-    # Analyze headers for sensitive data (especially Authorization, Cookie, etc.)
-    header_text = ""
-    sensitive_headers = ['authorization', 'cookie', 'x-api-key', 'x-auth-token', 'proxy-authorization']
-    for key, value in flow.request.headers.items():
-        if key.lower() in sensitive_headers:
-            header_text += f"{key}: {value}\n"
-
-    header_findings = detector.analyze(header_text)
-
-    # Combine findings
-    findings = {
-        'critical': body_findings['critical'] + header_findings['critical'],
-        'suspicious': body_findings['suspicious'] + header_findings['suspicious'],
-        'safe': body_findings['safe'] and header_findings['safe']
-    }
+    # Analyze body for sensitive data (ignoring headers as per user request)
+    findings = detector.analyze(body)
     
     # Determine classification
     if findings['critical']:

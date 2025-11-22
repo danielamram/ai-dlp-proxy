@@ -136,29 +136,107 @@ class SensitiveDataDetector:
         """Recursively extract all string values from JSON object"""
         if depth > max_depth:
             return []
-        
+
         values = []
-        
+
         if isinstance(obj, dict):
             for key, value in obj.items():
                 # Check key names for sensitive indicators
                 key_lower = key.lower()
                 if any(sensitive in key_lower for sensitive in ['password', 'secret', 'token', 'key', 'credential']):
                     values.append(f"SENSITIVE_KEY:{key}={value}")
-                
+
                 if isinstance(value, (str, int, float, bool)):
                     values.append(str(value))
                 elif isinstance(value, (dict, list)):
                     values.extend(self.extract_json_values(value, depth + 1, max_depth))
-        
+
         elif isinstance(obj, list):
             for item in obj:
                 if isinstance(item, (str, int, float, bool)):
                     values.append(str(item))
                 elif isinstance(item, (dict, list)):
                     values.extend(self.extract_json_values(item, depth + 1, max_depth))
-        
+
         return values
+
+    def extract_user_prompt_and_files(self, parsed_data):
+        """Extract user prompts and file attachments from Cursor request format"""
+        result = {
+            'user_prompts': [],
+            'files': [],
+            'model': None,
+            'system_prompt': None
+        }
+
+        if not isinstance(parsed_data, dict):
+            return result
+
+        # Get model
+        result['model'] = parsed_data.get('model', parsed_data.get('modelName'))
+
+        # Extract messages - standard OpenAI/Anthropic format
+        messages = parsed_data.get('messages', [])
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = msg.get('role', '')
+                content = msg.get('content', '')
+
+                if role == 'user':
+                    # Handle content that can be string or array (for multimodal)
+                    if isinstance(content, str):
+                        result['user_prompts'].append(content)
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict):
+                                if item.get('type') == 'text':
+                                    result['user_prompts'].append(item.get('text', ''))
+                                elif item.get('type') == 'image_url':
+                                    result['files'].append(f"[Image: {item.get('image_url', {}).get('url', 'embedded')[:50]}...]")
+                            elif isinstance(item, str):
+                                result['user_prompts'].append(item)
+                elif role == 'system':
+                    if isinstance(content, str):
+                        result['system_prompt'] = content
+
+        # Extract file context - Cursor specific fields
+        context = parsed_data.get('context', {})
+        if isinstance(context, dict):
+            # Files array
+            files = context.get('files', [])
+            for f in files:
+                if isinstance(f, dict):
+                    name = f.get('name', f.get('path', f.get('filename', 'unknown')))
+                    result['files'].append(name)
+                elif isinstance(f, str):
+                    result['files'].append(f)
+
+            # Code snippets
+            code = context.get('code', context.get('codeContext', ''))
+            if code:
+                result['files'].append(f"[Code snippet: {len(code)} chars]")
+
+        # Also check for documents/attachments (alternative formats)
+        for key in ['documents', 'attachments', 'fileContents', 'codeBlocks']:
+            items = parsed_data.get(key, [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        name = item.get('name', item.get('path', item.get('filename', '')))
+                        if name:
+                            result['files'].append(name)
+                    elif isinstance(item, str):
+                        result['files'].append(f"[{key}: {len(item)} chars]")
+
+        # Check for inline file references in the prompt text
+        for prompt in result['user_prompts']:
+            # Look for @file patterns that Cursor uses
+            at_mentions = re.findall(r'@([\w./\\-]+\.\w+)', prompt)
+            for mention in at_mentions:
+                if mention not in result['files']:
+                    result['files'].append(f"@{mention}")
+
+        return result
     
     def analyze(self, body, raw_body=None, content_encoding=None):
         """Analyze body for sensitive patterns with enhanced parsing"""
@@ -228,6 +306,9 @@ class SensitiveDataDetector:
         if raw_size > 10000:
             suspicious.append(f"large_body: {raw_size} bytes")
 
+        # Extract user prompts and files
+        prompt_info = self.extract_user_prompt_and_files(parsed_data)
+
         return {
             'critical': critical,
             'suspicious': suspicious,
@@ -236,7 +317,11 @@ class SensitiveDataDetector:
             'safe': len(critical) == 0 and len(suspicious) == 0,
             'body_type': body_type,
             'body_size': raw_size,
-            'extracted_text': text[:2000] if text else ""  # Return extracted text for preview
+            'extracted_text': text[:2000] if text else "",  # Return extracted text for preview
+            'user_prompts': prompt_info['user_prompts'],
+            'files': prompt_info['files'],
+            'model': prompt_info['model'],
+            'system_prompt': prompt_info['system_prompt']
         }
 
 detector = SensitiveDataDetector()
@@ -305,8 +390,33 @@ def request(flow: http.HTTPFlow) -> None:
     print(f"  Method: {flow.request.method}")
     print(f"  URL: {flow.request.url}")
     print(f"  Host: {flow.request.pretty_host}")
+    if findings.get('model'):
+        print(f"  Model: {findings['model']}")
     print(f"  Body Type: {findings.get('body_type', 'unknown')}")
     print(f"  Body Size: {findings.get('body_size', body_size)} bytes")
+
+    # Display user prompts prominently
+    user_prompts = findings.get('user_prompts', [])
+    if user_prompts:
+        print(f"\n{Colors.BLUE}{Colors.BOLD}📝 USER PROMPT:{Colors.RESET}")
+        for i, prompt in enumerate(user_prompts):
+            if len(user_prompts) > 1:
+                print(f"  [{i+1}]")
+            # Show full prompt (truncate if very long)
+            if len(prompt) > 2000:
+                print(f"  {prompt[:2000]}")
+                print(f"  ... [truncated, {len(prompt)} total chars]")
+            else:
+                # Print each line with indentation
+                for line in prompt.split('\n'):
+                    print(f"  {line}")
+
+    # Display attached files
+    files = findings.get('files', [])
+    if files:
+        print(f"\n{Colors.BLUE}{Colors.BOLD}📎 ATTACHED FILES ({len(files)}):{Colors.RESET}")
+        for f in files:
+            print(f"  • {f}")
     
     if flow.request.headers:
         print(f"\n{Colors.BLUE}Headers:{Colors.RESET}")
